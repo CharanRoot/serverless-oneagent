@@ -2,6 +2,15 @@
 
 # ![Dynatrace](res/Dynatrace_Logo.png) <br/> OneAgent Serverless plugin
 
+--- 
+## Depreciation note
+
+**Starting with Dynatrace OneAgent 1.207, Dynatrace offers a dedicated AWS Lambda layer to monitor Node.js based AWS Lambda functions. Please review the [Dynatrace product news](https://www.dynatrace.com/news/blog/dynatrace-extends-distributed-tracing-for-serverless-on-aws-lambda/) and [documentation](https://www.dynatrace.com/support/help/technology-support/cloud-platforms/amazon-web-services/integrations/deploy-oneagent-as-lambda-extension/) to learn more.**
+
+**The new OneAgent deployment scheme voids the necessity of OneAgent Serverless plugin and its development and support will therefore be discontinued.**
+
+---
+
 dynatrace-oneagent is a plugin for [serverless framework](https://github.com/serverless/serverless) which will add Dynatrace monitoring automatically to serverless deployments.
 
 ## Disclaimer
@@ -34,7 +43,7 @@ plugins:
 
 provider:
   name: aws
-  runtime: nodejs6.10
+  runtime: nodejs10.x
 
 functions:
   hello:
@@ -65,38 +74,53 @@ If you do not want to add OneAgent options to the `serverless.yml` , the options
 serverless deploy --dt-oneagent-options='{"dynatraceTagPropertyPath":"headers.x-dynatrace","server":"...","tenant":"...","tenanttoken":"..."}'
 ```
 
-### Yarn configuration 
-NPM automatically install `@dynatrace/oneagent` dependency in build time but Yarn will throw build error. if Your using Yarn you need manually added `@dynatrace/oneagent` in the `package.json` file
-
-```
-"dependencies": {
-        "@dynatrace/oneagent": "xxx"
-    },
-    "devDependencies": {
-        "@dynatrace/serverless-oneagent": "xxx"
-    } 
- ```
-    
 ### Options summary
 
 | `serverless.yml`| command line | description |
 | ---| ---| --- |
 | options | --dt-oneagent-options=\<option string\> | Specifies OneAgent options |
 | npmModuleVersion | --dt-oneagent-module-version=\<version\> | Specifies the version of OneAgent for PaaS module. Default is `latest`, specify `next` for @next version.|
-| verbose | --verbose | enables extended output of plugin processing. --verbose enables verbose mode for all plugins, while verbose option in `serverless.yml` enables verbose output for this plugin only.
+| verbose | --verbose | enables extended output of plugin processing. --verbose enables verbose mode for all plugins, while verbose option in `serverless.yml` enables verbose output for this plugin only.|
+| exclude | --dt-exclude | exclude given list of functions from instrumentation. Separate function names with comma on command line.
+| skipUninstall  | --dt-skip-uninstall | de-installation of @dynatrace/oneagent module after packaging might interfere with alternative dependency management tools like [lerna](https://github.com/lerna/lerna). This option suppresses the de-installation of @dynatrace/oneagent npm module. |
 
 ```yaml
+...
+functions:
+  lambdaTest1:
+    handler: test/first.handler
+
+  lambdaTest2:
+    handler: test/second.handler
+...
 custom:
   serverless-oneagent:
     # enable serverless-oneagent plugin verbose mode
     verbose: true
     # specify @next Dynatrace OneAgent npm module
     npmModuleVersion: next
+    exclude:
+      - lambdaTest2
 ```
 
 ```shell
-serverless deploy --dt-oneagent-module-version=next --dt-oneagent-options='{"dynatraceTagPropertyPath":"headers.x-dynatrace","server":"...","tenant":"...","tenanttoken":"..."}' --verbose
+serverless deploy --dt-oneagent-module-version=next --dt-oneagent-options='{"dynatraceTagPropertyPath":"headers.x-dynatrace","server":"...","tenant":"...","tenanttoken":"..."}' --verbose --dt-exclude=lambdaTest2
 ```
+
+### Yarn configuration
+
+Serverless plugin installs automatically `@dynatrace/oneagent` dependency at build time which causes a Yarn build error. To work around that build error, manually add `@dynatrace/oneagent` in the `package.json` file
+
+e.g.
+
+```yaml
+"dependencies": {
+        "@dynatrace/oneagent": "latest"
+},
+"devDependencies": {
+        "@dynatrace/serverless-oneagent": "xxx"
+}
+ ```
 
 ## Samples
 
@@ -108,7 +132,7 @@ The samples folder contains ready to go serverless projects.
 ## Supported provider and runtime environments
 
 + The current plugin version supports following deployments
-  + AWS Lambda with Node.js runtime version 4.x, 6.x, 8.x and 10.x
+  + AWS Lambda with Node.js runtime version 8.x, 10.x and 12.x
 
 ## Support
 

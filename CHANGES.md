@@ -1,5 +1,28 @@
 # Change Log
 
+## Version 1.0.15
+
+- `dt-skip-uninstall` option added
+- updated outdated package dependencies
+- package-lock.json added
+
+## Version 1.0.14
+
+- added capability to exclude functions from instrumentation
+- Node.js 12.x runtime support
+
+## Version 1.0.13
+
+- DT_LAMBDA_HANDLER support for WebPack projects
+
+## Version 1.0.12
+
+- fix issue setting DT_LAMBDA_HANDLER in function definition
+
+## Version 1.0.11
+
+- support for DT_LAMBDA_HANDLER environment variable (resolves issues with handlers in subfolders)
+
 ## Version 1.0.10
 
 - Node.js 10.x runtime support

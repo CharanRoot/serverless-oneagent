@@ -21,14 +21,14 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 // ----------------------------------------------------------------------------
-
-import * as Npm from "npm";
 import * as ChildProcess from "child_process";
-import * as Stream from "stream";
-import * as Path from "path";
 import * as FileSystem from "fs";
-import * as OS from "os";
 import * as _ from "lodash";
+import * as Npm from "npm";
+import * as OS from "os";
+import * as Path from "path";
+import * as Stream from "stream";
+
 
 // ============================================================================
 
@@ -79,6 +79,9 @@ namespace Serverless {
 		"dt-oneagent-options"?: string;
 		"dt-debug"?: boolean;
 		"dt-oneagent-module-version"?: string;
+		"dt-set-dt-lambda-handler"?: boolean;
+		"dt-exclude"?: string;
+		"dt-skip-uninstall"?: boolean;
 	}
 
 	interface Function {
@@ -148,6 +151,22 @@ interface PluginYamlConfig {
 	 * enables --verbose mode only for this serverless plugin
 	 */
 	verbose?: boolean;
+
+	/**
+	 * new style handler definition rewrite.
+	 * will set DT_LAMBDA_HANDLER instead of encoding user handler in handler definition
+	 */
+	setDtLambdaHandler?: boolean;
+
+	/**
+	 * exclude the specified functions from monitoring
+	 */
+	exclude?: string[];
+
+	/**
+	 * skip uninstall will force the plugin to skip the npm uninstall of the OneAgent package
+	 */
+	skipUninstall?: boolean;
 }
 
 // ============================================================================
@@ -226,6 +245,27 @@ interface Config {
 	 * OneAgent option string
 	 */
 	agentOptions: string;
+
+	/**
+	 * new style handler definition rewrite.
+	 * will set DT_LAMBDA_HANDLER instead of encoding user handler in handler definition
+	 */
+	setDtLambdaHandler: boolean;
+
+	/**
+	 * true, if @dynatrace/oneagent/lib/LambdaUtil.js file exists
+	 */
+	oneagentNpmModuleSupportsDtLambdaHandler: boolean;
+
+	/**
+	 * list of functions to exclude from monitoring
+	 */
+	exclude: string[];
+
+	/**
+	 * skip the npm uninstall of the serverless-oneagent, defaults to false
+	 */
+	skipUninstall: boolean;
 }
 
 // ============================================================================
@@ -300,7 +340,26 @@ class DynatraceOneAgentPlugin {
 
 		this.config.verbose = ymlConfig.verbose || this.options.verbose || this.options.v || false;
 		this.config.debug = ymlConfig.debug || this.options["dt-debug"] || false;
+
+		this.config.exclude = ymlConfig.exclude ||
+			((this.options["dt-exclude"] != null) ? `${this.options["dt-exclude"]}`.split(",") : undefined) ||
+			[];
+
 		this.config.agentOptions = this.options["dt-oneagent-options"] || ymlConfig.options || "";
+		const setDtLambdaHandler = this.options["dt-set-dt-lambda-handler"] || ymlConfig.setDtLambdaHandler;
+		if (setDtLambdaHandler != null) {
+			// user configuration - check if DT_LAMBDA_HANDLER is supported
+			if (setDtLambdaHandler && !this.config.oneagentNpmModuleSupportsDtLambdaHandler) {
+				throw new Error(`This version of @dynatrace/oneagent npm package does not support DT_LAMBDA_HANDLER`);
+			}
+			this.config.setDtLambdaHandler = setDtLambdaHandler;
+		} else {
+			// if DT_LAMBDA_HANDLER is supported, prefer over encoding user handler in handler redirect
+			this.config.setDtLambdaHandler = this.config.oneagentNpmModuleSupportsDtLambdaHandler;
+		}
+
+		this.config.skipUninstall =
+			this.options["dt-skip-uninstall"] || ymlConfig.skipUninstall || false;
 
 		// sanity check agent options (if already available - could be still a to be expanded variable)
 		if (this.config.agentOptions.length > 0 && !this.config.agentOptions.startsWith("$")) {
@@ -481,7 +540,10 @@ class DynatraceOneAgentPlugin {
 	private async postProcessPlainServerlessDeployment() {
 		this.updateConfig();
 		await this.rewriteHandlerDefinitions();
-		await this.npmUninstallOneAgentModule();
+
+		if (!this.config.skipUninstall) {
+			await this.npmUninstallOneAgentModule();
+		}
 	}
 
 	/**
@@ -503,15 +565,43 @@ class DynatraceOneAgentPlugin {
 			const runtime = (fn.runtime || _.get(this.serverless.service, "provider.runtime"));
 			this.log(`function ${k} runtime is ${runtime}`);
 
-			// only rewrite for functions with Node.js runtime
-			const isNodeJsRuntime = `${runtime}`.indexOf("nodejs") >= 0;
-			if (isNodeJsRuntime) {
+			// only rewrite for functions with Node.js runtime and which are not excluded from
+			const isExcluded = this.config.exclude.includes(k);
+			const isNodejsRuntime = `${runtime}`.indexOf("nodejs") >= 0;
+			const doInstrument = isNodejsRuntime && !isExcluded;
+			let exportSpec: string;
+			if (doInstrument) {
 				const origHandler = fn.handler;
-				const splitted = origHandler.split(".");
-				fn.handler = `node_modules/@dynatrace/oneagent/index.${splitted[0]}$${splitted[1]}`;
+				if (this.config.setDtLambdaHandler) {
+					exportSpec = "handler";
+					this.log(`adding DT_LAMBDA_HANDLER=${origHandler}`);
+					_.set(fn, "environment.DT_LAMBDA_HANDLER", origHandler);
+				} else {
+					const splitted = origHandler.split(".");
+					exportSpec = `${splitted[0]}$${splitted[1]}`;
+				}
+				fn.handler = `node_modules/@dynatrace/oneagent/index.${exportSpec}`;
 				this.log(`modifying Lambda handler ${k}: ${origHandler} -> ${fn.handler}`);
+			} else if (isExcluded) {
+				this.log(`function ${k} has been excluded from monitoring`);
+			} else if (!isNodejsRuntime) {
+				this.log(`not instrumenting function ${k} with runtime ${runtime}`);
 			}
 		});
+	}
+
+	private determineDtLambdaHandlerSupport(nodeModulePath: string) {
+		this.logVerbose("determining, if @dynatrace/oneagent supports DT_LAMBDA_HANDLER");
+		try {
+			// check if Dynatrace.Features.DtLambdaHandler is set in package.json
+			const resolvedPath = require.resolve("@dynatrace/oneagent/package.json", { paths: [nodeModulePath] });
+			const pkg = require(resolvedPath);
+			this.config.oneagentNpmModuleSupportsDtLambdaHandler = _.get(pkg, "Dynatrace.Features.DtLambdaHandler", false);
+		} catch (e) {
+			this.config.oneagentNpmModuleSupportsDtLambdaHandler = false;
+		}
+		this.updateConfig();
+		this.logVerbose(`@dynatrace/oneagent does${this.config.oneagentNpmModuleSupportsDtLambdaHandler ? "" : " not"} support DT_LAMBDA_HANDLER`);
 	}
 
 	/**
@@ -520,6 +610,8 @@ class DynatraceOneAgentPlugin {
 	 * binaries from the module to reduce zip package size
 	 */
 	private tailorOneAgentModule(nodeModulesPath = "./") {
+		this.determineDtLambdaHandlerSupport(nodeModulesPath);
+
 		this.log(`tailoring OneAgent module in ${nodeModulesPath}`);
 		return new Promise((resolve, reject) => {
 
@@ -660,7 +752,11 @@ class DynatraceOneAgentPlugin {
 	private readonly config: Config = {
 		verbose: false,
 		debug: false,
-		agentOptions: ""
+		agentOptions: "",
+		oneagentNpmModuleSupportsDtLambdaHandler: false,
+		setDtLambdaHandler: false,
+		exclude: [],
+		skipUninstall: false
 	};
 	private deploymentMode = DeploymentMode.Undetermined;
 	private readonly cannotTailorErrMsg = "could not determine serverless-webpack intermediate files to tailor OneAgent" +
